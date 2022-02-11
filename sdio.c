@@ -102,7 +102,7 @@ inline static int safe_wait_tx_empty(pio_hw_t *pio, uint sm) {
         if (wooble > 1000000) {
             check_pio_debug("stuck");
             printf("stuck %d @ %d\n", sm, (int)pio->sm[sm].addr);
-            __breakpoint();
+            // __breakpoint();
             return SD_ERR_STUCK;
         }
     }
@@ -116,7 +116,7 @@ inline static int safe_wait_tx_not_full(pio_hw_t *pio, uint sm) {
         if (wooble > 1000000) {
             check_pio_debug("stuck");
             printf("stuck %d @ %d\n", sm, (int)pio->sm[sm].addr);
-            __breakpoint();
+            // __breakpoint();
             return SD_ERR_STUCK;
         }
     }
@@ -130,7 +130,7 @@ inline static int safe_dma_wait_for_finish(pio_hw_t *pio, uint sm, uint chan) {
         if (wooble > 8000000) {
             check_pio_debug("stuck dma");
             printf("stuck dma channel %d rem %08x %d @ %d\n", chan, (uint)dma_hw->ch[chan].transfer_count, sm, (int)pio->sm[sm].addr);
-            __breakpoint();
+            // __breakpoint();
             return SD_ERR_STUCK;
         }
     }
@@ -141,7 +141,7 @@ inline static int safe_dma_wait_for_finish(pio_hw_t *pio, uint sm, uint chan) {
 static inline int acquiesce_sm(int sm) {
     check_pio_debug("ac1");
     int rc = safe_wait_tx_empty(sd_pio, sm);
-    if (rc) return rc;
+    if (rc != SD_OK) return rc;
     check_pio_debug("ac2");
     uint32_t foo = 0;
     uint32_t timeout = 1000000;
@@ -272,7 +272,7 @@ static int __time_critical_func(start_read)(int sm, uint32_t *buf, uint byte_len
         bit_length += bus_width == bw_wide ? 64 : 16;
     }
     rc = safe_wait_tx_not_full(sd_pio, sm);
-    if (rc) return rc;
+    if (rc != SD_OK) return rc;
     check_pio_debug("sd_repsone_dma");
     if (bus_width == bw_wide && sm != SD_CMD_SM)
     {
@@ -292,13 +292,13 @@ static int __time_critical_func(start_read)(int sm, uint32_t *buf, uint byte_len
     if (bit_length & 31u)
     {
         rc = safe_wait_tx_not_full(sd_pio, sm);
-        if (rc) return rc;
+        if (rc != SD_OK) return rc;
         pio_sm_put(sd_pio, sm, sd_pio_cmd(sd_cmd_or_dat_offset_state_inline_instruction,
                                     pio_encode_in(pio_null, 32 - (bit_length & 31u))));
     }
     // now go back to wait state
     rc = safe_wait_tx_not_full(sd_pio, sm);
-    if (rc) return rc;
+    if (rc != SD_OK) return rc;
     pio_sm_put(sd_pio, sm, sd_pio_cmd(sd_cmd_or_dat_offset_state_inline_instruction, pio_encode_jmp(
             sm == SD_DAT_SM ? sd_cmd_or_dat_offset_no_arg_state_waiting_for_cmd
                             : sd_cmd_or_dat_offset_no_arg_state_wait_high)));
@@ -310,7 +310,7 @@ static int __time_critical_func(finish_read)(uint dma_channel, int sm, uint16_t 
 {
     gpio_set_mask(1);
     int rc = safe_dma_wait_for_finish(sd_pio, sm, dma_channel);
-    if (rc) return rc;
+    if (rc != SD_OK) return rc;
     if (sniffed_crc) {
         *sniffed_crc = (uint16_t)dma_hw->sniff_data;
     }
@@ -334,14 +334,14 @@ int __time_critical_func(sd_response_dma)(uint dma_channel, uint sm, uint32_t *b
     int rc = SD_OK;
     if (first) {
         rc = start_single_dma(dma_channel, sm, buf, byte_length, bswap, sniffed_crc != 0);
-        if (!rc) rc = start_read(sm, buf, byte_length, enable);
+        if (rc == SD_OK) rc = start_read(sm, buf, byte_length, enable);
     }
 
-    if (!rc) rc =  finish_read(dma_channel, sm, suffixed_crc, sniffed_crc);
+    if (rc == SD_OK) rc =  finish_read(dma_channel, sm, suffixed_crc, sniffed_crc);
 
-    if (!last && !rc) {
-        if (!rc) rc = start_single_dma(dma_channel, sm, buf, byte_length, bswap, sniffed_crc != 0);
-        if (!rc) rc = start_read(sm, buf, byte_length, enable);
+    if (!last && (rc == SD_OK)) {
+        if (rc == SD_OK) rc = start_single_dma(dma_channel, sm, buf, byte_length, bswap, sniffed_crc != 0);
+        if (rc == SD_OK) rc = start_read(sm, buf, byte_length, enable);
     }
     return rc;
 }
@@ -349,7 +349,7 @@ int __time_critical_func(sd_response_dma)(uint dma_channel, uint sm, uint32_t *b
 int __noinline sd_command(uint64_t packed_command, uint32_t *receive_buf, uint byte_length)
 {
     int rc = acquiesce_sm(SD_CMD_SM);
-    if (rc) return rc;
+    if (rc != SD_OK) return rc;
     sd_debug("SD command %d\n", 0x3fu & (((uint)packed_command) >> 24u));
     // disable SM so we don't have a race on us filling the FIFO - we must not stall or we will lose sync with clock
     pio_sm_set_enabled(sd_pio, SD_CMD_SM, false);
@@ -360,7 +360,7 @@ int __noinline sd_command(uint64_t packed_command, uint32_t *receive_buf, uint b
     if (byte_length)
     {
         rc = sd_response_dma(sd_cmd_dma_channel, SD_CMD_SM, receive_buf, byte_length, false, NULL, NULL, true, true, true);
-        if (!rc)
+        if (rc == SD_OK)
         {
             uint32_t cmd = ((uint32_t) packed_command) >> 24u;
             cmd &= 63u;
@@ -409,7 +409,7 @@ int __noinline sd_command(uint64_t packed_command, uint32_t *receive_buf, uint b
 int sd_wait()
 {
     int rc = acquiesce_sm(SD_DAT_SM);
-    if (!rc)
+    if (rc == SD_OK)
     {
         pio_sm_put(sd_pio, SD_DAT_SM, sd_pio_cmd(sd_cmd_or_dat_offset_state_inline_instruction, pio_encode_set(pio_pindirs, 0)));
         pio_sm_put(sd_pio, SD_DAT_SM,
@@ -465,14 +465,15 @@ void print_status(uint32_t *response_buffer, bool needs_fixup) {
     // printf("\n");
 }
 
-void read_status(bool dump)
+int read_status(bool dump)
 {
     uint32_t response_buffer[5];
 
     int not_ready_retries = 3;
     while (not_ready_retries--) {
       // let's see the status
-      sd_command(sd_make_command(13, rca_high, rca_low, 0, 0), response_buffer, 6);
+      int rc = sd_command(sd_make_command(13, rca_high, rca_low, 0, 0), response_buffer, 6);
+      if (rc != SD_OK) return rc;
       fixup_cmd_response_48(response_buffer);
       uint8_t *b = (uint8_t *)response_buffer;
       // printf("%02x %02x %02x %02x : %02x %02x\n", b[0], b[1], b[2], b[3], b[4], b[5]);
@@ -487,6 +488,7 @@ void read_status(bool dump)
       // sleep_ms(1);
       sleep_ms(50); // nzc
     }
+    return SD_OK;
 }
 
 int sd_set_wide_bus(bool wide)
@@ -499,11 +501,11 @@ int sd_set_wide_bus(bool wide)
         }
         uint32_t response_buffer[5];
         int rc = sd_command(sd_make_command(55, rca_high, rca_low, 0, 0), response_buffer, 6);
-        if (!rc)
+        if (rc == SD_OK)
         {
             rc = sd_command(sd_make_command(6, 0, 0, 0, wide ? 2 : 0), response_buffer, 6);
         }
-        if (!rc) {
+        if (rc == SD_OK) {
             bus_width = wide ? bw_wide : bw_narrow;
         } else {
             bus_width = bw_unknown;
@@ -619,7 +621,7 @@ static int sd_init( bool _allow_four_data_pins)
     fixup_cmd_response_48(response_buffer);
     if (byte_buf[4] != 0xa5)
     {
-        __breakpoint();
+        // __breakpoint();
         printf("R7 check pattern doesn't match sent\r\n");
         return -1;
     }
@@ -645,7 +647,7 @@ static int sd_init( bool _allow_four_data_pins)
     sd_wait();
 
     int rc = sd_set_wide_bus(allow_four_data_pins);
-    if (!rc)
+    if (rc == SD_OK)
     {
         rc = sd_set_clock_divider(1); // as fast as possible please
     }
@@ -709,7 +711,7 @@ int sd_readblocks_sync(uint32_t *buf, uint32_t block, uint block_count)
     *p++ = 0;
     *p++ = 0;
     int rc = sd_readblocks_scatter_async(ctrl_words, block, block_count);
-    if (!rc)
+    if (rc == SD_OK)
     {
 //        printf("waiting for finish\n");
         while (!sd_scatter_read_complete(&rc))
@@ -804,7 +806,7 @@ int sd_readblocks_scatter_async(uint32_t *control_words, uint32_t block, uint bl
         // todo can we expect support for 23?
         rc = sd_command(sd_make_command(23, block_count >> 24, block_count >> 16, block_count >> 8, block_count & 0xffu),
                         response_buffer, 6);
-        if (!rc) rc = sd_command(sd_make_command(18, block >> 24, block >> 16, block >> 8, block & 0xffu), response_buffer, 6);
+        if (rc == SD_OK) rc = sd_command(sd_make_command(18, block >> 24, block >> 16, block >> 8, block & 0xffu), response_buffer, 6);
     }
     return rc;
 }
@@ -995,7 +997,7 @@ int sd_writeblocks_async(const uint32_t *data, uint32_t sector_num, uint sector_
 
     assert(sector_count);
     int rc = sd_set_wide_bus(false); // use 1 bit writes for now
-    if (rc) return rc;
+    if (rc != SD_OK) return rc;
 
     if (sector_count == 1) {
         rc = sd_command(sd_make_command(24, sector_num >> 24, (sector_num >> 16) & 0xff, (sector_num >> 8) & 0xff, sector_num & 0xffu), response_buffer, 6);
@@ -1006,12 +1008,14 @@ int sd_writeblocks_async(const uint32_t *data, uint32_t sector_num, uint sector_
         // todo can we expect support for 23?
         rc = sd_command(sd_make_command(23, sector_count >> 24, sector_count >> 16, sector_count >> 8, sector_count & 0xffu),
                         response_buffer, 6);
-        if (!rc) rc = sd_command(sd_make_command(25, sector_num >> 24, sector_num >> 16, sector_num >> 8, sector_num & 0xffu), response_buffer, 6);
+        if (rc == SD_OK) rc = sd_command(sd_make_command(25, sector_num >> 24, sector_num >> 16, sector_num >> 8, sector_num & 0xffu), response_buffer, 6);
     }
     
-    read_status(true);
+    if (rc != SD_OK) return rc;
+
+    rc = read_status(true);
     
-    if (!rc)
+    if (rc == SD_OK)
     {
         pio_sm_set_enabled(sd_pio, SD_DAT_SM, false);
         dma_sniffer_enable(sd_data_dma_channel, DMA_SNIFF_CTRL_CALC_VALUE_CRC16, true);
@@ -1128,7 +1132,7 @@ int sd_read_sectors_1bit_crc_async(uint32_t *sector_buf, uint32_t sector, uint s
         // todo can we expect support for 23?
         rc = sd_command(sd_make_command(23, sector_count >> 24, sector_count >> 16, sector_count >> 8, sector_count & 0xffu),
                         response_buffer, 6);
-        if (!rc) rc = sd_command(sd_make_command(18, sector >> 24, sector >> 16, sector >> 8, sector & 0xffu), response_buffer, 6);
+        if (rc == SD_OK) rc = sd_command(sd_make_command(18, sector >> 24, sector >> 16, sector >> 8, sector & 0xffu), response_buffer, 6);
     }
     return rc;
 }
